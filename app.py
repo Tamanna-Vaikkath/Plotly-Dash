@@ -1977,9 +1977,10 @@ def build_variance_story_tab():
         })
 
     # Pull real policies for story cards from df
+    _story_src = _STORY_DF if _STORY_DF is not None else df
     def _pick_policy(mask_fn, sort_col, ascending=False, n=1):
         try:
-            sub = df[mask_fn(df)]
+            sub = _story_src[mask_fn(_story_src)]
             if sub.empty: return None
             sub = sub.sort_values(sort_col, ascending=ascending)
             return sub.iloc[0]
@@ -2052,14 +2053,40 @@ def build_variance_story_tab():
     card_s3 = _safe_card(
         _s3, "fas fa-tint", AMBER,
         lambda r: (
-            f"Recent water claim ({int(r['Water_Loss_Recency_Months'])} months ago) + "
-            f"dense tree canopy ({r['Tree_Canopy_Density']:.0f}%) — GLM treated them independently."
+            f"A water claim filed just {int(r['Water_Loss_Recency_Months'])} months ago — "
+            f"the GLM charged a standard rate as if the risk had already passed."
         ),
-        lambda r: (
-            f"Water loss recency within 12 months is the strongest predictor of repeat claims, "
-            f"yet the GLM applies only a coarse bucket. GA2M's exponential decay shape "
-            f"captures the recency spike precisely and adjusts upward before another loss occurs."
-        ),
+        lambda r: [
+            html.Span("Think of it this way: ",
+                      style={"fontWeight": "700", "color": NAVY, "fontStyle": "normal"}),
+            (f"Imagine a pipe burst in your kitchen {int(r['Water_Loss_Recency_Months'])} months ago. "
+             "The plumber fixed the visible pipe — but behind the walls, there is still moisture, "
+             "the wood framing may be softening, and mould could be quietly growing. "
+             "The risk of another water damage event in the next few months is far higher "
+             "than it was before the first claim. Everyone who has dealt with a water leak "
+             "understands this intuitively."),
+            html.Br(), html.Br(),
+            html.Span("What the GLM does: ",
+                      style={"fontWeight": "700", "color": "#B03020", "fontStyle": "normal"}),
+            (f"The GLM puts this home into a generic 'had a prior claim' bucket and applies "
+             "a standard loading — the same whether the claim was 2 months ago or 20 months ago. "
+             "It cannot tell the difference. It treats time as irrelevant, so it prices this policy "
+             "almost the same as a home with no recent claims at all."),
+            html.Br(), html.Br(),
+            html.Span("What GA2M does: ",
+                      style={"fontWeight": "700", "color": "#1A6030", "fontStyle": "normal"}),
+            ("GA2M learned from thousands of historical claims that water damage risk "
+             "follows a sharp decay curve — extremely elevated in months 0 to 12 "
+             "as residual damage lingers, then dropping steeply as repairs stabilise. "
+             "It priced this policy to reflect the actual risk window it is currently in, "
+             "not a flat average across all policyholders who ever had a water claim."),
+            html.Br(), html.Br(),
+            html.Span(
+                f"The result: the GLM left ${abs(float(r['Final_Pure_Premium']) - float(r['GLM_Pure_Premium'])):,.0f} "
+                "of premium on the table. GA2M recovered it — pricing this home correctly "
+                "for where it actually sits on the risk curve right now.",
+                style={"fontWeight": "600", "color": NAVY, "fontStyle": "normal"}),
+        ],
     )
     card_s4 = _safe_card(
         _s4, "fas fa-gem", GREEN,
@@ -2095,7 +2122,7 @@ def build_variance_story_tab():
         Diamond markers = the specific policy's actual GLM and GA2M premiums
         from the card above — these match the card numbers exactly.
         """
-        _SRC = df.copy()
+        _SRC = (_STORY_DF if _STORY_DF is not None else df).copy()
         if "Dwelling_Age" not in _SRC.columns:
             _SRC["Dwelling_Age"] = (2026 - _SRC["Year_Built"]).astype(int)
 
@@ -2201,6 +2228,25 @@ def build_variance_story_tab():
                     layer="below",
                 )
 
+                # Actual loss marker — blue diamond (ground truth)
+                _p_act = float(policy_row.get("Expected_Pure_Premium",
+                                              policy_row["Final_Pure_Premium"]))
+                fig.add_trace(go.Scatter(
+                    x=[_p_grp], y=[_p_act],
+                    mode="markers",
+                    name=f"This policy — Actual: ${_p_act:,.0f}",
+                    marker=dict(symbol="diamond", size=14,
+                                color="#4A7FC1",
+                                line=dict(color=WHITE, width=2)),
+                    hovertemplate=(
+                        f"<b>Ground Truth — Actual Loss</b><br>"
+                        f"Actual: <b>${_p_act:,.0f}</b><br>"
+                        f"This is what really happened. "
+                        f"GA2M lands close to this; GLM does not."
+                        f"<extra></extra>"
+                    ),
+                ))
+
                 # GLM policy marker — solid red diamond
                 fig.add_trace(go.Scatter(
                     x=[_p_grp], y=[_p_glm],
@@ -2234,23 +2280,26 @@ def build_variance_story_tab():
                     ),
                 ))
 
-                # Connecting line between the two diamonds
+                # Connecting line spanning Actual → GLM → GA2M
+                _span_lo = min(_p_act, _p_glm, _p_ga2m)
+                _span_hi = max(_p_act, _p_glm, _p_ga2m)
                 fig.add_trace(go.Scatter(
-                    x=[_p_grp, _p_grp], y=[_p_glm, _p_ga2m],
+                    x=[_p_grp, _p_grp], y=[_span_lo, _span_hi],
                     mode="lines",
                     showlegend=False,
                     line=dict(color=accent_color, width=2, dash="dot"),
                     hoverinfo="skip",
                 ))
 
-                # Callout box showing exact card numbers
-                _ann_y = max(_p_glm, _p_ga2m) * 1.12
+                # Callout box showing exact card numbers + actual
+                _ann_y = _span_hi * 1.12
                 fig.add_annotation(
                     x=_p_grp, y=_ann_y,
                     text=(f"<b>This policy</b><br>"
-                          f"GLM: ${_p_glm:,.0f}<br>"
-                          f"GA2M: ${_p_ga2m:,.0f}<br>"
-                          f"<b>Adj: {_sign}${abs(_p_adj):,.0f}</b>"),
+                          f"Actual Loss: ${_p_act:,.0f}<br>"
+                          f"GLM: ${_p_glm:,.0f} ({'under' if _p_glm < _p_act else 'over'}prices by ${abs(_p_act-_p_glm):,.0f})<br>"
+                          f"GA2M: ${_p_ga2m:,.0f} (gap vs actual: ${abs(_p_act-_p_ga2m):,.0f})<br>"
+                          f"<b>GA2M adj: {_sign}${abs(_p_adj):,.0f}</b>"),
                     showarrow=True, arrowhead=2,
                     arrowcolor=accent_color,
                     ax=0, ay=-40,
@@ -2366,7 +2415,7 @@ def build_variance_story_tab():
                             "Every policy in your portfolio contains risk signals your GLM "
                             "structurally cannot price — non-linear curves, compounding "
                             "interactions, and temporal decay patterns. This layer finds them, "
-                            "prices them precisely, and proves every adjustment in plain English.",
+                            "prices them precisely, and proves every adjustment accurately.",
                             style={"fontSize": "0.88rem", "color": MUTED, "lineHeight": "1.6"},
                         ),
                     ])
@@ -2428,150 +2477,66 @@ def build_variance_story_tab():
             ), width=12,
         )], className="g-3 mb-4"),
 
-        # ── Story cards ───────────────────────────────────────────────────────
-        dbc.Alert([
-            html.I(className="fas fa-book-open me-2", style={"color": NAVY}),
-            html.Strong("Real Policies, Real Stories: "),
-            "The four cards below show actual policies from this portfolio where the GA2M "
-            "intelligence layer detected risk patterns the GLM missed — with the exact "
-            "premium adjustment and a plain-English explanation of why. "
-            "Each story is a live example of adverse selection prevented or overpricing corrected.",
-        ], color="light", className="mb-3",
-           style={"borderLeft": f"4px solid {NAVY}", "backgroundColor": "#F4F6FB",
-                  "borderRadius": "8px", "fontSize": "0.85rem"}),
-
+        # ── Story card + chart side by side ─────────────────────────────────
         dbc.Row([
-            dbc.Col(card_s1, width=3),
-            dbc.Col(card_s2, width=3),
-            dbc.Col(card_s3, width=3),
-            dbc.Col(card_s4, width=3),
-        ], className="g-3 mb-4"),
 
+            # ── Left col: story card ──────────────────────────────────────────
+            dbc.Col(card_s3, width=5, className="d-flex"),
 
-        # ── ANOVA-style story charts ──────────────────────────────────────────
-        dbc.Alert([
-            html.I(className="fas fa-chart-bar me-2", style={"color": NAVY}),
-            html.Strong("Why GA2M Catches What GLM Misses — Visualised: "),
-            "Each chart shows two layers. ",
-            html.Strong("Bars (faded): "),
-            "portfolio group averages — showing how risk changes across risk buckets. ",
-            html.Strong("Diamond markers: "),
-            "the exact GLM and GA2M premiums for the specific policy in the card above — "
-            "these numbers match the card exactly. "
-            "The dotted box highlights that policy's group. Hover any element for details.",
-        ], color="light", className="mb-3",
-           style={"borderLeft": f"4px solid {NAVY}", "backgroundColor": "#F4F6FB",
-                  "borderRadius": "8px", "fontSize": "0.84rem"}),
-
-        dbc.Row([
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader([
-                        html.Span([
-                            html.I(className="fas fa-fire me-2",
-                                   style={"color": RED, "fontSize": "0.85rem"}),
-                            html.Strong("Story 1 — Roof Age",
-                                        style={"color": NAVY, "fontSize": "0.88rem"}),
-                        ]),
-                        html.Div(
-                            "GLM applies a constant slope across all roof ages. "
-                            "GA2M learns that risk barely grows before 20 yrs, "
-                            "then accelerates sharply.",
-                            style={"fontSize": "0.76rem", "color": MUTED,
-                                   "marginTop": "3px", "lineHeight": "1.4"}),
-                    ], style={"backgroundColor": WHITE, "border": "none",
-                               "paddingBottom": "4px"}),
-                    dbc.CardBody(
-                        dcc.Graph(figure=fig_story1,
-                                  config={"displayModeBar": False}),
-                        style={"padding": "0 8px 8px 8px"}),
-                ], style=CARD_STYLE),
-            ], width=6),
-
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader([
-                        html.Span([
-                            html.I(className="fas fa-water me-2",
-                                   style={"color": BLUE, "fontSize": "0.85rem"}),
-                            html.Strong("Story 2 — Dwelling Age",
-                                        style={"color": NAVY, "fontSize": "0.88rem"}),
-                        ]),
-                        html.Div(
-                            "GLM treats every decade equally. "
-                            "GA2M detects the threshold past 40 yrs "
-                            "where compounding failures drive a step-change in risk.",
-                            style={"fontSize": "0.76rem", "color": MUTED,
-                                   "marginTop": "3px", "lineHeight": "1.4"}),
-                    ], style={"backgroundColor": WHITE, "border": "none",
-                               "paddingBottom": "4px"}),
-                    dbc.CardBody(
-                        dcc.Graph(figure=fig_story2,
-                                  config={"displayModeBar": False}),
-                        style={"padding": "0 8px 8px 8px"}),
-                ], style=CARD_STYLE),
-            ], width=6),
-        ], className="g-3 mb-3"),
-
-        dbc.Row([
+            # ── Right col: ANOVA chart ────────────────────────────────────────
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
                         html.Span([
                             html.I(className="fas fa-tint me-2",
                                    style={"color": AMBER, "fontSize": "0.85rem"}),
-                            html.Strong("Story 3 — Water Loss Recency",
+                            html.Strong("Story  — Water Loss Recency",
                                         style={"color": NAVY, "fontSize": "0.88rem"}),
                         ]),
-                        html.Div(
-                            "Risk spikes in the 0–12 month window then decays. "
-                            "GLM applies a coarse bucket — GA2M captures "
-                            "the sharp recency spike precisely.",
-                            style={"fontSize": "0.76rem", "color": MUTED,
-                                   "marginTop": "3px", "lineHeight": "1.4"}),
-                    ], style={"backgroundColor": WHITE, "border": "none",
-                               "paddingBottom": "4px"}),
+                        html.Div([
+                            html.Span("What the GLM gets wrong: ",
+                                      style={"fontWeight":"600","color":"#B03020"}),
+                            "The GLM puts all recent water claims into one bucket — treating a "
+                            "claim from last month the same as one from 11 months ago. "
+                            "It misses the spike in repeat-claim risk right after a loss.",
+                            html.Br(),
+                            html.Span("What GA2M discovers: ",
+                                      style={"fontWeight":"600","color":"#1A6030"}),
+                            "A claim within the last 0–3 months almost always means the "
+                            "underlying problem still exists. GA2M's exponential decay shape "
+                            "captures this spike precisely — the GLM's coarse bucket cannot.",
+                            html.Br(),
+                            html.Span("Read the chart: ",
+                                      style={"fontWeight":"600","color":"#1E3A5F"}),
+                            "In the 0–12 month bar, the ",
+                            html.Span("red ♦ (GLM) is far below the actual bar",
+                                      style={"color":"#E63946","fontWeight":"600"}),
+                            " — badly undercharging the risk. The ",
+                            html.Span("green ♦ (GA2M) is nearly touching the actual bar.",
+                                      style={"color":"#2D8A50","fontWeight":"600"}),
+                            " That gap is recovered premium.",
+                        ], style={"fontSize":"0.76rem","color":MUTED,
+                                   "marginTop":"5px","lineHeight":"1.6"}),
+                    ], style={"backgroundColor":WHITE,"border":"none","paddingBottom":"4px"}),
                     dbc.CardBody(
-                        dcc.Graph(figure=fig_story3,
-                                  config={"displayModeBar": False}),
-                        style={"padding": "0 8px 8px 8px"}),
+                        dcc.Graph(figure=fig_story3, config={"displayModeBar":False}),
+                        style={"padding":"0 8px 8px 8px"}),
                 ], style=CARD_STYLE),
-            ], width=6),
+            ], width=7),
 
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader([
-                        html.Span([
-                            html.I(className="fas fa-gem me-2",
-                                   style={"color": GREEN, "fontSize": "0.85rem"}),
-                            html.Strong("Story 4 — Building Code Compliance",
-                                        style={"color": NAVY, "fontSize": "0.88rem"}),
-                        ]),
-                        html.Div(
-                            "GLM applies blanket relativities. "
-                            "GA2M discovers that 90–100% compliance earns "
-                            "a non-linear credit the GLM never grants.",
-                            style={"fontSize": "0.76rem", "color": MUTED,
-                                   "marginTop": "3px", "lineHeight": "1.4"}),
-                    ], style={"backgroundColor": WHITE, "border": "none",
-                               "paddingBottom": "4px"}),
-                    dbc.CardBody(
-                        dcc.Graph(figure=fig_story4,
-                                  config={"displayModeBar": False}),
-                        style={"padding": "0 8px 8px 8px"}),
-                ], style=CARD_STYLE),
-            ], width=6),
-        ], className="g-3 mb-4"),
+        ], className="g-3 mb-4", align="stretch"),
 
         # ── Feature Deep Dive ─────────────────────────────────────────────────
         dbc.Alert([
             html.I(className="fas fa-search me-2", style={"color": GOLD}),
             html.Strong("Feature Deep Dive — GLM vs GA2M: See the Gap Clearly "),
             html.Br(),
-            "Select one variable from each dropdown. The chart updates to show that variable's "
-            "risk curve — and how the GLM's straight line compares to GA2M's learned curve. "
-            "The third chart (Combined Effect) shows what happens when both risk factors "
-            "are present together — and why the combined premium gap is larger than either alone.",
+            "Select a feature below. The top chart shows how the GLM misprices it "
+            "with a straight line, and how GA2M corrects it by learning the true risk curve. "
+            "The bottom chart shows what happens when ",
+            html.Strong("Roof Age and Hail Frequency combine "),
+            "— the interaction effect that is larger than either risk alone, "
+            "and that only GA2M can detect.",
         ], color="warning", className="mb-3",
            style={"borderLeft": f"4px solid {GOLD}", "backgroundColor": "#FFFBF0",
                   "borderRadius": "8px", "fontSize": "0.84rem"}),
@@ -2581,53 +2546,26 @@ def build_variance_story_tab():
             dbc.Col([
                 dbc.Card([dbc.CardBody([
 
-                    # Dropdown 1 — GLM Linear
+                    # Single dropdown — Roof Age or Hail Frequency
                     html.Div([
-                        html.Div([
-                            html.Span("●", style={"color": "#E63946", "marginRight": "6px",
-                                                   "fontSize": "0.75rem"}),
-                            html.Span("DROPDOWN 1 — LEGACY GLM FEATURE",
-                                      style={"fontSize": "0.65rem", "color": MUTED,
-                                             "fontWeight": "700", "letterSpacing": "0.06em"}),
-                        ], className="d-flex align-items-center mb-1"),
-                        html.Div("Variables the GLM already uses — priced with a straight line",
-                                 style={"fontSize": "0.72rem", "color": MUTED,
-                                        "fontStyle": "italic", "marginBottom": "6px"}),
+                        html.Div("CHOOSE A RISK FEATURE TO EXPLORE",
+                                 style={"fontSize": "0.65rem", "color": MUTED,
+                                        "fontWeight": "700", "letterSpacing": "0.06em",
+                                        "marginBottom": "4px"}),
+                                        
                         dcc.Dropdown(
                             id="feature-dive-dd",
                             options=[
-                                {"label": "Protection Class (1–10)", "value": "Protection_Class"},
-                                {"label": "CLUE Prior Loss Count",    "value": "CLUE_Loss_Count"},
-                            ],
-                            value="Protection_Class",
-                            clearable=False,
-                            style={"fontSize": "0.85rem"},
-                        ),
-                    ], className="mb-4"),
-
-                    # Dropdown 2 — Non-linear
-                    html.Div([
-                        html.Div([
-                            html.Span("●", style={"color": "#2D8A50", "marginRight": "6px",
-                                                   "fontSize": "0.75rem"}),
-                            html.Span("DROPDOWN 2 — NON-LINEAR FEATURE",
-                                      style={"fontSize": "0.65rem", "color": MUTED,
-                                             "fontWeight": "700", "letterSpacing": "0.06em"}),
-                        ], className="d-flex align-items-center mb-1"),
-                        html.Div("Variables where risk curves, spikes, or compounds — invisible to GLM",
-                                 style={"fontSize": "0.72rem", "color": MUTED,
-                                        "fontStyle": "italic", "marginBottom": "6px"}),
-                        dcc.Dropdown(
-                            id="feature-dive-dd2",
-                            options=[
-                                {"label": "Roof Age (years)",                "value": "Roof_Age_Applicant"},
-                                {"label": "Hail Frequency (events/year)",    "value": "Hail_Frequency"},
+                                {"label": "Roof Age (years)",              "value": "Roof_Age_Applicant"},
+                                {"label": "Hail Frequency (events/year)",  "value": "Hail_Frequency"},
                             ],
                             value="Roof_Age_Applicant",
                             clearable=False,
                             style={"fontSize": "0.85rem"},
                         ),
                     ], className="mb-3"),
+                    # dd2 is kept as a hidden store so the callback signature is unchanged
+                    dcc.Store(id="feature-dive-dd2", data="Hail_Frequency"),
 
                     html.Hr(style={"borderColor": BORDER, "margin": "10px 0"}),
 
@@ -2639,79 +2577,82 @@ def build_variance_story_tab():
                 ])], style=CARD_STYLE),
             ], width=3),
 
-            # ── Right panel: 3 charts stacked ─────────────────────────────────
+            # ── Right panel: main GLM vs GA2M chart + interaction chart ─────
             dbc.Col([
-                # Chart row 1: Linear feature (top-left) + Non-linear feature (top-right)
-                dbc.Row([
-                    dbc.Col([
-                        dbc.Card([
-                            dbc.CardHeader([
-                                html.Div([
-                                    html.Span("●", style={"color": "#E63946",
-                                              "marginRight": "6px", "fontSize": "0.75rem"}),
-                                    html.Strong(id="card-title-glm",
-                                                style={"fontSize": "0.84rem", "color": NAVY}),
-                                ], className="d-flex align-items-center"),
-                                html.Div("GLM Legacy Feature — straight line only",
-                                         style={"fontSize": "0.73rem", "color": MUTED,
-                                                "marginTop": "2px"}),
-                            ], style={"backgroundColor": WHITE, "border": "none",
-                                       "paddingBottom": "4px"}),
-                            dbc.CardBody(
-                                dcc.Loading(
-                                    dcc.Graph(id="feature-dive-overlay",
-                                              config={"displayModeBar": False}),
-                                    type="circle"),
-                                style={"padding": "0 8px 8px 8px"}),
-                        ], style=CARD_STYLE),
-                    ], width=6),
 
-                    dbc.Col([
-                        dbc.Card([
-                            dbc.CardHeader([
-                                html.Div([
-                                    html.Span("●", style={"color": "#2D8A50",
-                                              "marginRight": "6px", "fontSize": "0.75rem"}),
-                                    html.Strong(id="card-title-gam",
-                                                style={"fontSize": "0.84rem", "color": NAVY}),
-                                ], className="d-flex align-items-center"),
-                                html.Div("Non-Linear Feature — GA2M captures the true curve",
-                                         style={"fontSize": "0.73rem", "color": MUTED,
-                                                "marginTop": "2px"}),
-                            ], style={"backgroundColor": WHITE, "border": "none",
-                                       "paddingBottom": "4px"}),
-                            dbc.CardBody(
-                                dcc.Loading(
-                                    dcc.Graph(id="feature-dive-overlay2",
-                                              config={"displayModeBar": False}),
-                                    type="circle"),
-                                style={"padding": "0 8px 8px 8px"}),
-                        ], style=CARD_STYLE),
-                    ], width=6),
-                ], className="g-3 mb-3"),
+                # Chart 1: Selected feature — GLM straight line vs GA2M true curve
+                dbc.Card([
+                    dbc.CardHeader([
+                        html.Div([
+                            html.Span("●", style={"color":"#E63946","marginRight":"5px",
+                                                   "fontSize":"0.75rem"}),
+                            html.Strong(id="card-title-glm",
+                                        style={"fontSize":"0.84rem","color":NAVY}),
+                            html.Span(" — GLM mispricing vs ", style={"color":MUTED,"margin":"0 4px"}),
+                            html.Span("●", style={"color":"#2D8A50","marginRight":"5px",
+                                                   "fontSize":"0.75rem"}),
+                            html.Strong(id="card-title-gam",
+                                        style={"fontSize":"0.84rem","color":NAVY}),
+                        ], className="d-flex align-items-center flex-wrap"),
+                        html.Div([
+                            html.Span("Grey bars", style={"fontWeight":"600","color":"#4A7FC1"}),
+                            " = actual losses (ground truth).  ",
+                            html.Span("Red dashed line", style={"fontWeight":"600","color":"#E63946"}),
+                            " = GLM's straight-line pricing — same increment every year/event.  ",
+                            html.Span("Green solid line", style={"fontWeight":"600","color":"#2D8A50"}),
+                            " = GA2M's learned curve — matches the true risk shape.  "
+                            "The shaded area between red and green is mispriced premium.",
+                        ], style={"fontSize":"0.73rem","color":MUTED,"marginTop":"3px","lineHeight":"1.55"}),
+                    ], style={"backgroundColor":WHITE,"border":"none","paddingBottom":"4px"}),
+                    dbc.CardBody(
+                        dcc.Loading(
+                            dcc.Graph(id="feature-dive-overlay",
+                                      config={"displayModeBar":False}),
+                            type="circle"),
+                        style={"padding":"0 8px 8px 8px"}),
+                ], style={**CARD_STYLE, "marginBottom":"16px"}),
 
-                # Chart row 2: Combined effect (full width)
+                # Chart 2: Roof Age × Hail Frequency interaction — always shown
                 dbc.Card([
                     dbc.CardHeader([
                         html.Div([
                             html.I(className="fas fa-layer-group me-2",
-                                   style={"color": GOLD, "fontSize": "0.85rem"}),
-                            html.Strong("Combined Risk Effect — When Both Factors Are Present Together",
-                                        style={"fontSize": "0.84rem", "color": NAVY}),
+                                   style={"color":GOLD,"fontSize":"0.85rem"}),
+                            html.Strong("Roof Age × Hail Frequency — How the Interaction Is Created",
+                                        style={"fontSize":"0.84rem","color":NAVY}),
                         ], className="d-flex align-items-center"),
-                        html.Div(
-                            "Policies that score high on BOTH risk factors. "
-                            "The combined premium gap is larger than either factor alone — "
-                            "this is the interaction effect the GLM cannot price.",
-                            style={"fontSize": "0.73rem", "color": MUTED, "marginTop": "2px"}),
-                    ], style={"backgroundColor": WHITE, "border": "none", "paddingBottom": "4px"}),
+                        html.Div([
+                            html.Span("Why does the interaction matter? ",
+                                      style={"fontWeight":"600","color":"#7A5C00"}),
+                            "A 25-year-old roof in a high-hail zone is not just "
+                            "old roof risk + hail risk added together. Each hail storm hits "
+                            "an already-degraded roof harder — the damage compounds. "
+                            "The GLM can only add the two risks separately; it misses this compounding. ",
+                            html.Span("GA2M detects that the combined risk is larger than the sum of its parts, "
+                                      "and adjusts the premium accordingly.",
+                                      style={"color":"#1A6030","fontWeight":"600"}),
+                            html.Br(),
+                            html.Span("Read the chart: ",
+                                      style={"fontWeight":"600","color":"#1E3A5F"}),
+                            "Watch the rightmost bar group (Old Roof + High Hail). "
+                            "The GLM's red bar is far below the actual blue bar — "
+                            "systematically underpricing this compound risk. "
+                            "GA2M's green bar lands close to the actual.",
+                        ], style={"fontSize":"0.73rem","color":MUTED,"marginTop":"3px","lineHeight":"1.6"}),
+                    ], style={"backgroundColor":WHITE,"border":"none","paddingBottom":"4px"}),
                     dbc.CardBody(
                         dcc.Loading(
                             dcc.Graph(id="feature-dive-combined",
-                                      config={"displayModeBar": False}),
+                                      config={"displayModeBar":False}),
                             type="circle"),
-                        style={"padding": "0 8px 8px 8px"}),
+                        style={"padding":"0 8px 8px 8px"}),
                 ], style=CARD_STYLE),
+
+                # Hidden — satisfies callback output for feature-dive-overlay2
+                html.Div(
+                    dcc.Graph(id="feature-dive-overlay2",
+                              config={"displayModeBar":False}),
+                    style={"display":"none"}),
 
             ], width=9),
         ], className="g-3 pb-4"),
@@ -3037,8 +2978,19 @@ def update_policy_view(selected_idx, view_type):
 
 # ── Load synthetic dive data once at startup ──────────────────────────────────
 import os as _os
-_DIVE_CSV = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                           "data", "dive_synthetic_data.csv")
+_DIVE_CSV  = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                            "data", "dive_synthetic_data.csv")
+_STORY_CSV = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                            "data", "story_synthetic_data.csv")
+
+# Load story-section synthetic data (used only in variance story tab charts + cards)
+try:
+    _STORY_DF = pd.read_csv(_STORY_CSV)
+    print(f"  Loaded story synthetic data: {len(_STORY_DF):,} rows")
+except FileNotFoundError:
+    _STORY_DF = None
+    print("  WARNING: story_synthetic_data.csv not found — story charts will use main df")
+
 try:
     _DIVE_DF = pd.read_csv(_DIVE_CSV)
     print(f"  Loaded dive synthetic data: {len(_DIVE_DF):,} rows, "
@@ -3101,18 +3053,36 @@ _FD_META = {
     "Roof_Age_Applicant": {
         "label": "Roof Age (years)",
         "type": "nonlinear",
-        "what": "How old the roof is. This is the clearest example of non-linear risk in homeowners insurance — the GLM's straight line fails dramatically here.",
-        "glm": "The GLM treats year 1 and year 25 identically — the same risk increment per year. Look at the red dashed line: a perfectly straight slope from 0 to 40 years. Now look at the grey bars — they are flat through year 15, then accelerate sharply. The GLM misses the entire acceleration. At year 30, the GLM undercharges by hundreds of dollars per policy.",
-        "gam": "GA2M learned the hockey-stick shape from claims data: nearly flat risk from 0–15 years, then the curve bends sharply upward as granule loss, cracking underlayment, and hail vulnerability compound together. The green curve matches the grey bars — the GLM's red line does not. This is structural improvement, not overfitting.",
-        "so_what": "Roof age is where the industry loses the most premium. Every carrier using only a GLM is systematically undercharging 25+ year old roofs. The gap between red and green represents recoverable premium — GA2M captures it.",
+        "what": "How many years since the roof was last replaced. The older the roof, the more it has been weakened by weather, UV, and wear — but the relationship is not a straight line.",
+        "glm": "The GLM charges the same fixed extra amount for every year of roof age. "
+               "So a 5-year-old roof and a 30-year-old roof each get the same per-year surcharge. "
+               "That means a 30-year-old roof is undercharged badly — the GLM's red line "
+               "stays low even where actual claims spike sharply.",
+        "gam": "GA2M discovered from real claims data that roofs are actually fine up to about "
+               "15 years — risk barely changes. After 15 years, granule loss, cracking underlayment, "
+               "and repeated hail impact start compounding. Risk accelerates sharply. "
+               "The green curve bends upward exactly where the grey bars (actual losses) do.",
+        "so_what": "Every carrier relying only on a GLM is systematically leaving money on the table "
+                   "for 20+ year old roofs. GA2M captures this recoverable premium by pricing the "
+                   "true risk shape, not just a straight line.",
     },
     "Hail_Frequency": {
         "label": "Hail Frequency (events/year)",
         "type": "nonlinear",
-        "what": "How many significant hail events per year at this location. The TX/OK/CO hail belt sees 5–8 events/year — exponentially more damaging than 2 events/year.",
-        "glm": "The GLM adds the same fixed surcharge per hail event. At 6 events/year it charges 6× the single-event increment. The red line is perfectly straight. But look at the grey bars — they barely rise from 0 to 3 events, then jump steeply. The GLM overcharges low-frequency locations and catastrophically undercharges high-frequency ones.",
-        "gam": "GA2M learns the threshold: below 3 events/year, roofs recover between storms. Above 4 events/year, each storm hits an already-stressed roof — damage compounds. The green curve is nearly flat through frequency 3, then bends sharply upward. This threshold effect is invisible to any linear model. The peak gap exceeds $600 per policy.",
-        "so_what": "The hail belt is the single largest source of adverse selection in homeowners insurance. GA2M's threshold detection correctly surcharges the top-frequency locations that every GLM in the industry systematically underprices.",
+        "what": "How many significant hail storms hit this location per year. "
+                "Low-hail regions (e.g. Pacific Coast) see 0–1 events/year. "
+                "The TX/CO/OK hail belt sees 5–9 events — a completely different risk profile.",
+        "glm": "The GLM adds the same fixed surcharge per extra hail event per year. "
+               "So 6 events = exactly 6× the single-event amount. This overcharges low-frequency "
+               "locations and catastrophically undercharges the high-frequency hail belt. "
+               "The red line stays flat and misses the sharp jump above 3 events/year.",
+        "gam": "GA2M finds the threshold at ~3 events/year. Below that, roofs recover between "
+               "storms and risk stays low. Above it, each storm hits an already-stressed roof — "
+               "damage compounds fast. The green curve is flat through frequency 3, "
+               "then bends steeply upward. This threshold is invisible to any straight-line model.",
+        "so_what": "The hail belt is one of the largest sources of adverse selection in homeowners. "
+                   "GA2M's threshold detection surcharges the highest-frequency locations "
+                   "that every linear GLM in the industry systematically underprices.",
     },
 }
 
@@ -3270,7 +3240,11 @@ def _build_dive_chart(feature, accent_color, chart_height=320):
 
 
 def _build_combined_chart(glm_feat, nl_feat, chart_height=300):
-    # Show combined risk effect across risk-group combinations.
+    # Always show Roof Age × Hail Frequency interaction — the key story.
+    # glm_feat / nl_feat args kept for callback compat but overridden here.
+    glm_feat = "Roof_Age_Applicant"
+    nl_feat  = "Hail_Frequency"
+
     _BAR_COLORS = {
         "Actual": "rgba(160,185,220,0.65)",
         "GLM":    "rgba(230,57,70,0.70)",
@@ -3289,7 +3263,7 @@ def _build_combined_chart(glm_feat, nl_feat, chart_height=300):
     glm_label = _FD_LABELS.get(glm_feat, glm_feat)
     nl_label  = _FD_LABELS.get(nl_feat,  nl_feat)
 
-    # Define LOW / HIGH bins for each feature (bottom/top quartile)
+    # Define LOW / HIGH bins for each feature (bottom/top 33%)
     def _risk_group(vals, feature):
         lo = np.percentile(vals, 33)
         hi = np.percentile(vals, 67)
@@ -3299,13 +3273,13 @@ def _build_combined_chart(glm_feat, nl_feat, chart_height=300):
     glm_d["risk"] = _risk_group(glm_d["feature_value"].values, glm_feat)
     nl_d["risk"]  = _risk_group(nl_d["feature_value"].values,  nl_feat)
 
-    # Build 4 scenario groups
+    # Build 4 scenario groups with clear client-facing labels
     scenarios = []
     for g_grp, n_grp, label in [
-        ("Low Risk",  "Low Risk",  f"Low {glm_label.split(' (')[0]}\n+ Low {nl_label.split(' (')[0]}"),
-        ("Low Risk",  "High Risk", f"Low {glm_label.split(' (')[0]}\n+ High {nl_label.split(' (')[0]}"),
-        ("High Risk", "Low Risk",  f"High {glm_label.split(' (')[0]}\n+ Low {nl_label.split(' (')[0]}"),
-        ("High Risk", "High Risk", f"High {glm_label.split(' (')[0]}\n+ High {nl_label.split(' (')[0]}"),
+        ("Low Risk",  "Low Risk",  "New Roof (0–15 yr)<br>+ Low Hail Frequency"),
+        ("Low Risk",  "High Risk", "New Roof (0–15 yr)<br>+ High Hail Frequency"),
+        ("High Risk", "Low Risk",  "Old Roof (20+ yr)<br>+ Low Hail Frequency"),
+        ("High Risk", "High Risk", "Old Roof (20+ yr)<br>+ High Hail Frequency<br>← Compound Risk"),
     ]:
         g_sub = glm_d[glm_d["risk"] == g_grp]
         n_sub = nl_d[nl_d["risk"]  == n_grp]
@@ -3397,9 +3371,13 @@ def _build_combined_chart(glm_feat, nl_feat, chart_height=300):
      Output("card-title-glm",        "children"),
      Output("card-title-gam",        "children")],
     [Input("feature-dive-dd",  "value"),
-     Input("feature-dive-dd2", "value")],
+     Input("feature-dive-dd2", "data")],
 )
 def update_feature_dive(glm_feat, nl_feat):
+    # nl_feat is always "Hail_Frequency" via hidden Store;
+    # the combined chart overrides both to Roof_Age × Hail_Frequency anyway.
+    if nl_feat is None:
+        nl_feat = "Hail_Frequency"
     glm_meta = _FD_META.get(glm_feat, {})
     nl_meta  = _FD_META.get(nl_feat,  {})
     glm_lbl  = _FD_LABELS.get(glm_feat, glm_feat)
@@ -3437,8 +3415,6 @@ def update_feature_dive(glm_feat, nl_feat):
         # GA2M feature block
         html.Div([
             html.Div([
-                html.Span("●", style={"color": "#2D8A50", "marginRight": "6px",
-                                       "fontSize": "0.75rem"}),
                 html.Strong(nl_lbl.split(" (")[0],
                             style={"color": NAVY, "fontSize": "0.85rem"}),
                 dbc.Badge("Non-Linear", color="success", className="ms-2",
@@ -3454,25 +3430,6 @@ def update_feature_dive(glm_feat, nl_feat):
                             "marginBottom": "10px"}),
         ]),
 
-        html.Hr(style={"borderColor": BORDER, "margin": "6px 0"}),
-
-        # Combined insight
-        html.Div([
-            html.Div([
-                html.I(className="fas fa-layer-group me-2",
-                       style={"color": GOLD, "fontSize": "0.75rem"}),
-                html.Span("COMBINED EFFECT",
-                          style={"fontSize": "0.65rem", "color": MUTED,
-                                 "fontWeight": "700", "letterSpacing": "0.06em"}),
-            ], className="d-flex align-items-center mb-1"),
-            html.Div(
-                "When both risk factors are high together, the combined premium gap "
-                "exceeds the sum of each alone. The GLM adds them linearly; "
-                "GA2M captures the compound effect — this is the interaction "
-                "the bottom chart demonstrates.",
-                style={"fontSize": "0.75rem", "color": MUTED,
-                       "lineHeight": "1.45", "fontStyle": "italic"}),
-        ]),
     ]
 
     return fig_glm, fig_nl, fig_combined, meta, glm_lbl, nl_lbl
